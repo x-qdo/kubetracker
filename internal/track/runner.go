@@ -665,11 +665,18 @@ loop:
 	}
 
 	if len(errs) > 0 {
-		var msgs []string
+		// Return deadline exceeded as-is for proper timeout detection by callers.
 		for _, e := range errs {
-			msgs = append(msgs, e.Error())
+			if errors.Is(e, context.DeadlineExceeded) {
+				return context.DeadlineExceeded
+			}
 		}
-		return fmt.Errorf("tracking failed: %s", strings.Join(msgs, "; "))
+		// If only one error, return it directly.
+		if len(errs) == 1 {
+			return errs[0]
+		}
+		// Join multiple errors and wrap to keep original messages while preserving error causes.
+		return fmt.Errorf("tracking failed: %w", errors.Join(errs...))
 	}
 
 	return nil

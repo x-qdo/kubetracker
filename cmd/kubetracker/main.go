@@ -19,6 +19,7 @@ import (
 
 	"github.com/x-qdo/kubedogcli/internal/kube"
 	"github.com/x-qdo/kubedogcli/internal/track"
+	"github.com/x-qdo/kubedogcli/pkg/exitcode"
 )
 
 var (
@@ -48,8 +49,20 @@ type options struct {
 func main() {
 	root := newRootCmd()
 	if err := root.Execute(); err != nil {
+		var ee *exitcode.ExitError
+		if errors.As(err, &ee) {
+			if ee.Err != nil && ee.Code != 0 {
+				_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", ee.Err)
+			}
+			os.Exit(ee.Code)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(exitcode.ExitTimedOut)
+		}
+		// Treat other cobra/validation errors as invalid input
 		_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitcode.ExitInvalidInput)
 	}
 }
 
@@ -140,7 +153,7 @@ func runTrack(cmd *cobra.Command, opts *options) error {
 	}
 
 	if opts.timeout < 0 {
-		return errors.New("--timeout must be >= 0")
+		return exitcode.InvalidInput(errors.New("--timeout must be >= 0"))
 	}
 
 	ctx := cmd.Context()
@@ -155,7 +168,7 @@ func runTrack(cmd *cobra.Command, opts *options) error {
 	}
 	objects, readWarnings, err := loadManifests(opts.files, opts.namespace, opts.recursive, opts.verbose)
 	if err != nil {
-		return fmt.Errorf("load manifests: %w", err)
+		return exitcode.InvalidInput(fmt.Errorf("load manifests: %w", err))
 	}
 	for _, w := range readWarnings {
 		if !opts.quiet {
@@ -171,7 +184,7 @@ func runTrack(cmd *cobra.Command, opts *options) error {
 		cmd.Printf("Tracking %d object(s) after filtering\n", len(objects))
 	}
 	if len(objects) == 0 {
-		return errors.New("no Kubernetes objects found after filtering")
+		return exitcode.InvalidInput(errors.New("no Kubernetes objects found after filtering"))
 	}
 
 	if opts.printSummary && !opts.quiet {
@@ -196,7 +209,7 @@ func runTrack(cmd *cobra.Command, opts *options) error {
 		InsecureSkipTLSVerify: false,
 	})
 	if err != nil {
-		return fmt.Errorf("kube factory: %w", err)
+		return exitcode.InvalidInput(fmt.Errorf("kube factory: %w", err))
 	}
 	if opts.verbose {
 		cmd.Printf("Kubernetes clients initialized\n")
@@ -231,7 +244,10 @@ func runTrack(cmd *cobra.Command, opts *options) error {
 	}
 
 	if err := runner.Run(ctx, objects); err != nil {
-		return err
+		if errors.Is(err, context.DeadlineExceeded) {
+			return exitcode.Timeout(err)
+		}
+		return exitcode.New(exitcode.ExitFailed, err)
 	}
 	if opts.printSummary && !opts.quiet {
 		cmd.Println("Tracking completed. Final summary:")
