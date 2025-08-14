@@ -17,9 +17,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
-	"github.com/x-qdo/kubedogcli/internal/kube"
-	"github.com/x-qdo/kubedogcli/internal/track"
-	"github.com/x-qdo/kubedogcli/pkg/exitcode"
+	"github.com/x-qdo/kubetracker/internal/kube"
+	"github.com/x-qdo/kubetracker/internal/track"
+	"github.com/x-qdo/kubetracker/pkg/exitcode"
 )
 
 var (

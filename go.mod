@@ -1,4 +1,4 @@
-module github.com/x-qdo/kubedogcli
+module github.com/x-qdo/kubetracker
 
 go 1.24.0
 

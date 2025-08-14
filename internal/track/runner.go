@@ -24,8 +24,8 @@ import (
 	kdstatestore "github.com/werf/kubedog/pkg/trackers/dyntracker/statestore"
 	kdutil "github.com/werf/kubedog/pkg/trackers/dyntracker/util"
 
-	"github.com/x-qdo/kubedogcli/internal/kube"
-	"github.com/x-qdo/kubedogcli/pkg/printer"
+	"github.com/x-qdo/kubetracker/internal/kube"
+	"github.com/x-qdo/kubetracker/pkg/printer"
 )
 
 // CRDConditionRule defines a readiness rule for a CRD based on status.conditions.
