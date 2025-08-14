@@ -171,7 +171,6 @@ func (r *Runner) startProgressPrinter(ctx context.Context) func() {
 		DefaultNamespace: r.opts.DefaultNamespace,
 		MaxTableWidth:    140, // a sensible default; can be made dynamic later
 		OnlyErrorLogs:    r.opts.OnlyErrorLogs,
-		Timeout:          r.opts.Timeout,
 	})
 
 	ticker := time.NewTicker(r.opts.ProgressPrintInterval)
