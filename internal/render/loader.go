@@ -25,8 +25,8 @@ import (
 	"sort"
 	"strings"
 
+	objutil "github.com/x-qdo/kubetracker/internal/objects"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
@@ -240,7 +240,7 @@ func isYAMLLike(name string) bool {
 // This is NOT exhaustive; it's intended to avoid setting a namespace for well-known
 // cluster-scoped resources when injecting a default namespace.
 func isClusterScoped(u *unstructured.Unstructured) bool {
-	gvk := objectGVK(u)
+	gvk := objutil.ObjectGVK(u)
 	kind := gvk.Kind
 	group := gvk.Group
 
@@ -261,20 +261,11 @@ func isClusterScoped(u *unstructured.Unstructured) bool {
 	return false
 }
 
-// objectGVK parses apiVersion/kind into a GroupVersionKind.
-func objectGVK(u *unstructured.Unstructured) schema.GroupVersionKind {
-	gv, err := schema.ParseGroupVersion(u.GetAPIVersion())
-	if err != nil {
-		return schema.GroupVersionKind{Group: "", Version: u.GetAPIVersion(), Kind: u.GetKind()}
-	}
-	return gv.WithKind(u.GetKind())
-}
-
 // sortObjects sorts objects by Group, Kind, Namespace, Name for determinism.
 func sortObjects(objs []*unstructured.Unstructured) []*unstructured.Unstructured {
 	sort.SliceStable(objs, func(i, j int) bool {
-		gi := objectGVK(objs[i])
-		gj := objectGVK(objs[j])
+		gi := objutil.ObjectGVK(objs[i])
+		gj := objutil.ObjectGVK(objs[j])
 
 		if gi.Group != gj.Group {
 			return gi.Group < gj.Group

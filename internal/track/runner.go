@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -25,8 +26,12 @@ import (
 	kdutil "github.com/werf/kubedog/pkg/trackers/dyntracker/util"
 
 	"github.com/x-qdo/kubetracker/internal/kube"
+	objutil "github.com/x-qdo/kubetracker/internal/objects"
 	"github.com/x-qdo/kubetracker/pkg/printer"
+	"k8s.io/client-go/util/flowcontrol"
 )
+
+const podStatusMinRefresh = 10 * time.Second
 
 // CRDConditionRule defines a readiness rule for a CRD based on status.conditions.
 // Example: external-secrets.io/v1beta1,ExternalSecret -> Condition: Ready, Expected: True
@@ -80,6 +85,12 @@ type Runner struct {
 	taskStore *kdstatestore.TaskStore
 	logStore  *kdutil.Concurrent[*kdlogstore.LogStore]
 
+	// throttle pod status GETs during enrichment
+	podStatusLast map[string]time.Time
+
+	// shared request rate limiter for polling
+	limiter flowcontrol.RateLimiter
+
 	// rule index for quick lookups
 	crdRulesIndex map[gvkKey]CRDConditionRule
 }
@@ -94,10 +105,30 @@ func NewRunner(factory *kube.Factory, opts RunnerOptions) *Runner {
 		factory: factory,
 		opts:    opts,
 		// kubedog state stores
-		taskStore: kdstatestore.NewTaskStore(),
-		logStore:  kdutil.NewConcurrent(kdlogstore.NewLogStore()),
+		taskStore:     kdstatestore.NewTaskStore(),
+		logStore:      kdutil.NewConcurrent(kdlogstore.NewLogStore()),
+		podStatusLast: make(map[string]time.Time),
 	}
 	r.buildCRDRulesIndex()
+
+	// build shared request rate limiter from rest.Config
+	cfg := factory.Config()
+	if cfg != nil {
+		if cfg.RateLimiter != nil {
+			r.limiter = cfg.RateLimiter
+		} else {
+			qps := cfg.QPS
+			if qps <= 0 {
+				qps = 5
+			}
+			burst := cfg.Burst
+			if burst <= 0 {
+				burst = 10
+			}
+			r.limiter = flowcontrol.NewTokenBucketRateLimiter(qps, burst)
+		}
+	}
+
 	return r
 }
 
@@ -140,6 +171,7 @@ func (r *Runner) startProgressPrinter(ctx context.Context) func() {
 		DefaultNamespace: r.opts.DefaultNamespace,
 		MaxTableWidth:    140, // a sensible default; can be made dynamic later
 		OnlyErrorLogs:    r.opts.OnlyErrorLogs,
+		Timeout:          r.opts.Timeout,
 	})
 
 	ticker := time.NewTicker(r.opts.ProgressPrintInterval)
@@ -223,6 +255,16 @@ func (r *Runner) enrichPodStatuses(ctx context.Context) {
 					continue
 				}
 
+				// rate-limit enrichment GETs per pod to reduce API pressure
+				key := ns + "/" + name
+				if ts, ok := r.podStatusLast[key]; ok && time.Since(ts) < podStatusMinRefresh {
+					continue
+				}
+				r.podStatusLast[key] = time.Now()
+
+				if r.limiter != nil {
+					r.limiter.Accept()
+				}
 				pod, err := r.factory.KubeClient().CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 				if err != nil || pod == nil {
 					continue
@@ -329,10 +371,24 @@ func (r *Runner) buildCRDRulesIndex() {
 // buildResourceSpecs converts unstructured objects into trackable specs with readiness strategies.
 func (r *Runner) buildResourceSpecs(objects []*unstructured.Unstructured) []resourceSpec {
 	var specs []resourceSpec
+	mapper := r.factory.Mapper()
+
 	for _, u := range objects {
+		gvk := objutil.ObjectGVK(u)
+		ns := u.GetNamespace()
+
+		// If namespace is missing, use RESTMapper to check scope and apply DefaultNamespace
+		if ns == "" && r.opts.DefaultNamespace != "" {
+			if mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); err == nil {
+				if mapping.Scope.Name() == apimeta.RESTScopeNameNamespace {
+					ns = r.opts.DefaultNamespace
+				}
+			}
+		}
+
 		specs = append(specs, resourceSpec{
-			GVK:       objectGVK(u),
-			Namespace: u.GetNamespace(),
+			GVK:       gvk,
+			Namespace: ns,
 			Name:      u.GetName(),
 			Readiness: r.inferReadinessStrategy(u),
 		})
@@ -342,7 +398,7 @@ func (r *Runner) buildResourceSpecs(objects []*unstructured.Unstructured) []reso
 
 // inferReadinessStrategy returns a readiness strategy for the given object.
 func (r *Runner) inferReadinessStrategy(u *unstructured.Unstructured) readinessStrategy {
-	gvk := objectGVK(u)
+	gvk := objutil.ObjectGVK(u)
 	kindLower := strings.ToLower(gvk.Kind)
 
 	// Known native workloads: use builtin tracking strategies (to be mapped to kubedog)
@@ -411,14 +467,6 @@ type gvkKey struct {
 // ------------------------------
 // Utilities
 // ------------------------------
-
-func objectGVK(u *unstructured.Unstructured) schema.GroupVersionKind {
-	gv, err := schema.ParseGroupVersion(u.GetAPIVersion())
-	if err != nil {
-		return schema.GroupVersionKind{Group: "", Version: u.GetAPIVersion(), Kind: u.GetKind()}
-	}
-	return gv.WithKind(u.GetKind())
-}
 
 // vprintf prints when verbose is enabled.
 func (r *Runner) vprintf(format string, args ...any) {
@@ -589,8 +637,10 @@ func (r *Runner) startAndWaitTrackers(ctx context.Context, specs []resourceSpec)
 					}
 
 					crs := task.ResourceState(spec.Name, spec.Namespace, spec.GVK)
-					ticker := time.NewTicker(2 * time.Second)
+					ticker := time.NewTicker(3 * time.Second)
 					defer ticker.Stop()
+					// jitter start to spread load across many resources
+					time.Sleep(time.Duration(rand.Int63n(int64(time.Second))))
 
 					for {
 						select {
@@ -605,6 +655,9 @@ func (r *Runner) startAndWaitTrackers(ctx context.Context, specs []resourceSpec)
 						case <-ticker.C:
 							var _u *unstructured.Unstructured
 							_ = _u
+							if r.limiter != nil {
+								r.limiter.Accept()
+							}
 							if spec.Namespace != "" {
 								_u, err = r.factory.Dynamic().Resource(gvr).Namespace(spec.Namespace).Get(ctx, spec.Name, metav1.GetOptions{})
 							} else {
@@ -616,7 +669,7 @@ func (r *Runner) startAndWaitTrackers(ctx context.Context, specs []resourceSpec)
 									rs.SetStatus(kdstatestore.ResourceStatusUnknown)
 								})
 								task.SetStatus(kdstatestore.ReadinessTaskStatusProgressing)
-								r.vprintf("Waiting for presence: %s %s/%s not found yet (%v)", spec.GVK.Kind, spec.Namespace, spec.Name, err)
+								r.vprintf("Waiting: %s %s/%s not found yet (%v)", spec.GVK.Kind, spec.Namespace, spec.Name, err)
 								continue
 							}
 
@@ -625,7 +678,7 @@ func (r *Runner) startAndWaitTrackers(ctx context.Context, specs []resourceSpec)
 								rs.SetStatus(kdstatestore.ResourceStatusReady)
 							})
 							task.SetStatus(kdstatestore.ReadinessTaskStatusReady)
-							r.vprintf("Present: %s %s/%s found", spec.GVK.Kind, spec.Namespace, spec.Name)
+							r.vprintf("%s %s/%s present", spec.GVK.Kind, spec.Namespace, spec.Name)
 							return
 						}
 					}
@@ -700,8 +753,10 @@ func (r *Runner) trackCRDCondition(ctx context.Context, mapper apimeta.Resettabl
 		rs.AddAttribute(kdstatestore.NewAttribute[string]("ConditionTarget", spec.Readiness.ConditionType))
 	})
 
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
+	// jitter start to spread load across many resources
+	time.Sleep(time.Duration(rand.Int63n(int64(time.Second))))
 
 	var last string
 
@@ -716,6 +771,9 @@ func (r *Runner) trackCRDCondition(ctx context.Context, mapper apimeta.Resettabl
 			return context.Cause(ctx)
 
 		case <-ticker.C:
+			if r.limiter != nil {
+				r.limiter.Accept()
+			}
 			var u *unstructured.Unstructured
 			if spec.Namespace != "" {
 				u, err = r.factory.Dynamic().Resource(gvr).Namespace(spec.Namespace).Get(ctx, spec.Name, metav1.GetOptions{})
@@ -728,7 +786,7 @@ func (r *Runner) trackCRDCondition(ctx context.Context, mapper apimeta.Resettabl
 					rs.SetStatus(kdstatestore.ResourceStatusUnknown)
 				})
 				rts.SetStatus(kdstatestore.ReadinessTaskStatusProgressing)
-				r.vprintf("Waiting for presence: %s %s/%s not found yet (%v)", spec.GVK.Kind, spec.Namespace, spec.Name, err)
+				r.vprintf("Waiting: %s %s/%s not found yet (%v)", spec.GVK.Kind, spec.Namespace, spec.Name, err)
 				continue
 			}
 
