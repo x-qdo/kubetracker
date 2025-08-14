@@ -1,0 +1,34 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/kubetracker
+    binary: kubetracker
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+archives:
+  - formats: ["tar.gz"]
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: x-qdo
+    name: kubetracker
+  draft: false
+  prerelease: auto
+  mode: replace
