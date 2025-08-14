@@ -360,8 +360,24 @@ func (r *Runner) buildCRDRulesIndex() {
 				idx[key] = CRDConditionRule{Group: g, Version: v, Kind: k, Condition: cond, Expected: exp}
 			}
 		}
-		// cert-manager Certificate readiness
+
+		// Strimzi Kafka CRDs
+		addRule("kafka.strimzi.io", "v1beta2", "KafkaTopic", "Ready", "True")
+		addRule("kafka.strimzi.io", "v1beta2", "Kafka", "Ready", "True")
+		addRule("kafka.strimzi.io", "v1beta2", "KafkaUser", "Ready", "True")
+
+		// cert-manager (old and new API groups) Certificate/Issuer readiness
+		addRule("certmanager.k8s.io", "v1alpha1", "Certificate", "Ready", "True")
+		addRule("certmanager.k8s.io", "v1alpha1", "Issuer", "Ready", "True")
 		addRule("cert-manager.io", "v1", "Certificate", "Ready", "True")
+		addRule("cert-manager.io", "v1", "Issuer", "Ready", "True")
+
+		// external-secrets
+		addRule("external-secrets.io", "v1beta1", "ExternalSecret", "Ready", "True")
+
+		// AWS Controllers for Kubernetes - DynamoDB Table readiness
+		addRule("dynamodb.services.k8s.aws", "v1alpha1", "Table", "ACK.ResourceSynced", "True")
+
 		// Apache APISIX ApisixRoute readiness
 		addRule("apisix.apache.org", "v2", "ApisixRoute", "ResourcesAvailable", "True")
 	}
